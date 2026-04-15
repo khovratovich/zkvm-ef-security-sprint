@@ -1,0 +1,57 @@
+\newcommand{\bwnote}[1]{%
+    {\color{red}\textbf{Benedikt says:} #1}%
+}
+
+\newcommand{\dknote}[1]{%
+    {\color{magenta}\textbf{Dmitry says:} #1}%
+}
+
+\newtcolorbox{instruction}{%
+  colback=teal!8,%
+  colframe=teal!50!black,%
+  fontupper=\sffamily\small\color{teal!40!black},%
+  boxrule=0.5pt,%
+  arc=2pt,%
+  left=6pt,right=6pt,top=4pt,bottom=4pt%
+}
+\newcommand{\aznote}[1]{%
+	{\color{blue}\textbf{Arantxa:} #1}%
+}
+\newcommand{\gknote}[1]{%
+	{\color{purple}\textbf{George:} #1}%
+}
+\newcommand{\PPP}{\mathcal{P}} %Program
+\newcommand{\III}{\mathcal{I}} %Input
+\newcommand{\OOO}{\mathcal{O}} %Output
+\newcommand{\WWW}{\mathcal{W}} %Witness
+\newcommand{\BBB}{\mathcal{B}} %Basic block
+
+\newcommand{\predicate}{\mathbf{P}}
+
+\newcommand{\TTT}{\mathcal{T}} %Trace
+\newcommand{\EE}{\mathbb{E}} %Ethereum state
+\newcommand{\GGG}{\mathcal{G}} %Segment
+
+\newcommand{\code}{\mathtt{code}} %Code of a segment
+\newcommand{\state}{\mathcal{S}} %State of a segment
+\newcommand{\mem}{\mathtt{mem}}
+\newcommand{\regs}{\mathtt{regs}}
+\newcommand{\pc}{\mathtt{pc}}
+\newcommand{\seg}{\mathrm{seg}}
+\newcommand{\www}{\mathsf{w}} %Witness for a step
+
+\newcommand{\relation}{\mathcal{R}}
+
+\newcommand{\Com}{\mathrm{Com}} %Commitment to memory
+\newcommand{\pred}[1]{\ensuremath{\varphi_{\mathrm{#1}}}} %Predicate for operations
+\newcommand{\op}{\mathrm{op}} %Operation code
+\newcommand{\rea}{\mathrm{read}} %Read operation code
+\newcommand{\writ}{\mathrm{write}} %Write operation code
+\newcommand{\step}{\mathrm{step}} %Relation for segment trace (inner-step)
+\newcommand{\keccak}{\mathrm{keccak}} %Relation for keccak precompile
+\newcommand{\poseidon}{\mathrm{poseidon}} %Relation for poseidon precompile
+\newcommand{\range}{\mathrm{range}} %Relation for range checks
+\newcommand{\bus}{\mathrm{bus}} %Relation for bus steps
+\newcommand{\Vfy}{\mathsf{V}} %Shorthand for Verify
+
+\newtheorem{claim}{Claim}

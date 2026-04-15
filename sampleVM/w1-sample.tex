@@ -1,0 +1,878 @@
+\documentclass[11pt]{article}
+
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{geometry,comment}
+\usepackage{xcolor}
+\geometry{margin=1in}
+\usepackage{tikz}
+\usepackage{tikz-cd}
+\usepackage{pgfplots}
+\usepackage[binary-units=true]{siunitx}
+\usepackage{graphicx}
+\usepackage[font=small]{caption}
+\usepackage[most]{tcolorbox}
+
+\title{A Vanilla zkVM Architecture}
+\author{George Kadianakis\quad Dmitry Khovratovich\quad Benedikt Wagner\quad Arantxa Zapico\\[8pt]
+{\normalsize Ethereum Foundation Cryptography Research}}
+
+\input{macros.tex}
+\date{8 April 2026}
+\begin{document}
+
+\maketitle
+
+\begin{instruction}
+This document is a reference example illustrating the expected scope and level of rigor. It is not meant to describe a zkVM that is implementable and efficient, and the described zkVM may not even be sound. Submitted documents should provide additional detail where applicable.
+\end{instruction}
+
+\section*{Overview}
+
+This document describes a sample \emph{vanilla zkVM} architecture designed according to the W1 deliverable of the EF zkVM whitepaper guidelines\footnote{\url{https://zkevm.ethereum.foundation/blog/cryptography-research-update}}.
+The architecture proves execution of a fixed RV+ (extended RISC-V) guest program using:
+
+\begin{itemize}
+\item Segmented execution traces
+\item Specialized constraint systems (``chips'')
+\item A system of interaction buses
+\item LogUp arguments for buses consistency
+\item WHIR-based STARK proofs
+\item Recursive aggregation of segment proofs
+\end{itemize}
+
+After execution, the trace is divided into segments. Each segment is proven by four inner circuits tied together by a shared bus, whose proofs are verified by a single segment circuit. Segment proofs are then recursively aggregated in a binary tree until a single proof attests to correctness of the entire program execution.
+
+\section{Execution Model}
+We define how a program is executed.
+
+\subsection{Program, Execution, and VM State}
+
+A \textbf{program} $\PPP$ is a fixed RV+ binary, compiled from an Ethereum State Transition function.
+Its inputs $\III$ are derived from the Ethereum state (\emph{initial state}), and
+the execution witness $\WWW$,
+and its outputs $\OOO$ are the final Ethereum state (\emph{final state}).
+
+The program $\PPP$ operates on the \textbf{VM state} $S$, defined as concatenation of the following components:
+\begin{itemize}
+\item $\pc$: 32-bit program counter
+\item $\regs[0..k-1]$: list of $k$ 32-bit register values
+\item $\mem[]$: byte-addressed writable memory
+\end{itemize}
+We separately denote the code of the program by $\code$. It is immutable and read-only, and is not part of the VM state.
+
+A single instruction step of the program execution is defined as a transition from
+one VM state to another according to the semantics of the instruction $\op$ retrieved from
+$\code$ at the program counter $\pc_1$. This is denoted as follows:
+\begin{equation}\label{eq:op}
+S:=(\pc_1,\regs_1,\mem_1)\xrightarrow{\op:=\code[\pc_1]} S':=(\pc_2,\regs_2,\mem_2)
+\end{equation}
+For example, if $\op$ is an addition instruction, which adds the first two registers and stores in the third register, then the semantics of the step is defined as
+\begin{align}
+\pc_2&=\pc_1+1,\\
+\regs_2&=\regs_1\text{ except that } \regs_2[2]:=\regs_1[0]+\regs_1[1],\\
+\mem_2&=\mem_1.
+\end{align}
+We will use the notation $(\pc_1,\regs_1,\mem_1)\rightarrow  (\pc_2,\regs_2,\mem_2)$ to denote that $S$ transitions to $S'$ by executing instruction
+ $\op:=\code[\pc_1]$.
+
+
+An \textbf{execution trace} for program $\code$ applied to inputs $\III$ is a sequence of VM states
+
+\[
+\TTT:\quad S_0 \rightarrow S_1 \rightarrow \cdots \rightarrow S_T
+\]
+where each step corresponds to execution of one instruction.
+
+
+A \textbf{zkVM proof} for $(\PPP,\EE,\EE')$,
+where $\EE$ and $\EE'$ are the initial and final Ethereum states, is a SNARK that proves the following:
+$$
+\begin{cases}
+S_0\rightarrow\cdots\rightarrow S_T;\\
+S_0:=(\pc_0:=0,\regs,\mem)\text{ where $\regs,\mem$ are derived from }\EE;\\
+S_T:=(\pc_T,\regs',\mem')\text{ where $\regs',\mem'$ are derived from }\EE';\\
+\end{cases}
+$$
+
+\subsection{Supported Instructions}
+The zkVM supports the RV+ instruction set, which is an extension of the RV32IM instruction set.
+Concretely, all operations:
+\begin{itemize}
+    \item conform to the state transition \eqref{eq:op}, i.e.
+    transform $(\pc_1,\regs_1,\mem_1)$ to $(\pc_2,\regs_2,\mem_2)$ according to the semantics of the instruction $\op$ retrieved from $\code$ at the program counter $\pc_1$.
+    \item are all standard RISC-V instructions\footnote{\url{https://riscv.org/technical/specifications/}} (executed according to the standard RISC-V semantics)
+     or additional
+    instructions (precompiles) for efficient execution of certain operations --- concretely,
+    Keccak and Poseidon.
+\end{itemize}
+For our purpose the exact semantics of the instructions is not important,
+and we treat them as black boxes with their own predicates modeling the correctness of the execution.
+
+Concretely, for given instruction $op$, the predicate $\varphi_{op}$  has the semantics
+\begin{multline}\label{eq:phiop}
+\varphi_{op}(\pc_1,\regs_1,\mem_1,\pc_2,\regs_2,\mem_2)=\mathrm{TRUE} \;\Longleftrightarrow\;\\
+ (\pc_1,\regs_1,\mem_1)\xrightarrow{\op} (\pc_2,\regs_2,\mem_2) \wedge \code[\pc_1]=op
+\end{multline}
+
+For instance, if $op$ is an ADD instruction, then $\mem_1=\mem_2$, $\pc_1+1=\pc_2$ and the registers change according to the ADD instruction.
+
+
+ Exceptions are memory operations,
+which we assume have the following syntax and semantics:
+\begin{align}\label{eq:mem-ops}
+\rea &:\;(\regs_1:=(addr,*,\ldots),\mem)\rightarrow (\regs_2:=(addr,x,\ldots),\mem):&\quad \mem[addr]&=x,\\
+\writ &:\;(\regs_1:=(addr,x,\ldots),\mem)\rightarrow (\regs_2:=(addr,x,\ldots),\mem'):&\quad \mem'[i]&=\begin{cases}
+x & \text{if }i=addr,\\
+\mem[i] & \text{otherwise}.
+\end{cases}
+\end{align}
+
+
+\section{Segmentation}
+We now explain how execution is split into segments.
+
+\subsection{Execution Segments}
+
+\begin{figure}
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[y=-1cm]
+  % Colors
+  \definecolor{alucol}{RGB}{195,195,235}
+  \definecolor{memcol}{RGB}{185,225,185}
+  \definecolor{hashcol}{RGB}{205,205,205}
+  \definecolor{poscol}{RGB}{245,215,175}
+  \definecolor{retcol}{RGB}{240,240,240}
+  \definecolor{codecol}{RGB}{235,190,190}
+  \definecolor{inputcol}{RGB}{190,230,190}
+  \definecolor{statecol}{RGB}{255,255,100}
+  %
+  \def\rh{0.38}
+  \def\bw{3.8cm}
+  %
+  \tikzset{
+    ibox/.style={draw, thin, minimum height=\rh cm, text width=\bw, inner sep=1.5pt,
+                 anchor=north west, font=\footnotesize\sffamily},
+    sbox/.style={draw, thin, rounded corners=3pt, fill=statecol, minimum height=0.38cm,
+                 text width=\bw, align=center, inner sep=1.5pt, font=\footnotesize\sffamily,
+                 anchor=north},
+    tbox/.style={draw, thin, rounded corners=2pt, minimum height=0.75cm, inner sep=3pt,
+                 font=\footnotesize\sffamily, align=center, anchor=north west},
+    seglabel/.style={font=\small, anchor=west},
+  }
+  %
+  %%% LEFT SIDE %%%
+  \node[anchor=north west, font=\small\bfseries] at (0, 0) {Program state and execution trace};
+  %
+  % Top boxes
+  \node[tbox, fill=codecol, text width=1.1cm] at (0.1, 0.5) {Program\\[-2pt]code};
+  \node[tbox, fill=inputcol, text width=1.2cm] at (1.7, 0.5) {Program\\[-2pt]inputs};
+  \node[tbox, fill=statecol, text width=2.0cm] at (3.3, 0.5) {Initial memory and\\[-2pt]registers};
+  %
+  % Left instruction list (18 rows)
+  \def\ly{1.85}
+  \def\lx{1.3}
+  \foreach \n/\txt/\col in {
+    0/{+}/alucol, 1/{-}/alucol, 2/{Exp}/alucol,
+    3/{Read(x)}/memcol, 4/{Write(x)}/memcol, 5/{Read(z)}/memcol,
+    6/{Keccak}/hashcol, 7/{=}/alucol, 8/{Read(z)}/memcol,
+    9/{Poseidon}/poscol, 10/{=}/alucol, 11/{Poseidon}/poscol,
+    12/{Keccak}/hashcol, 13/{Read(w)}/memcol,
+    14/{\textgreater\textgreater}/alucol, 15/{Write(w)}/memcol,
+    16/{=}/alucol, 17/{Return}/retcol%
+  } {
+    \node[ibox, fill=\col] at (\lx, {\ly+\n*\rh}) {\txt};
+  }
+  %
+  % Bottom boxes
+  \node[tbox, fill=inputcol, text width=1.3cm] at (0.1, {\ly+18*\rh+0.3}) {\raggedright Program\\[-2pt]outputs};
+  \node[tbox, fill=statecol, text width=2.6cm] at (1.9, {\ly+18*\rh+0.3}) {Final memory and\\[-2pt]registers};
+  %
+  %%% RIGHT SIDE %%%
+  \def\rx{8.2}
+  \pgfmathsetmacro{\rcx}{\rx + 1.953}
+  %
+  \node[anchor=north west, font=\small\bfseries] at (7.2, 0) {Trace after segmentation};
+  %
+  % --- Segment 1 ---
+  \def\startY{0.72}
+  \node[sbox] at (\rcx, \startY) {Program start state};
+  %
+  \pgfmathsetmacro{\segAy}{\startY + 0.48}
+  \foreach \n/\txt/\col in {
+    0/{+}/alucol, 1/{-}/alucol, 2/{Exp}/alucol,
+    3/{Read(x)}/memcol, 4/{Write(x)}/memcol, 5/{Read(z)}/memcol%
+  } {
+    \node[ibox, fill=\col] at (\rx, {\segAy+\n*\rh}) {\txt};
+  }
+  %
+  \pgfmathsetmacro{\segAtop}{\startY - 0.1}
+  \pgfmathsetmacro{\segAbot}{\segAy + 6*\rh + 0.04}
+  \draw[thin] ({\rx-0.2}, \segAtop) rectangle ({\rx+3.8+0.11+0.2}, \segAbot);
+  \node[seglabel] at ({\rx+3.8+0.11+0.4}, {(\segAtop+\segAbot)/2}) {Segment 1};
+  %
+  % --- Cross-segment state 1 ---
+  \pgfmathsetmacro{\isAy}{\segAbot + 0.14}
+  \node[sbox] at (\rcx, \isAy) {Cross-segment state};
+  %
+  % --- Segment 2 ---
+  \pgfmathsetmacro{\segBy}{\isAy + 0.58}
+  \foreach \n/\txt/\col in {
+    0/{Keccak}/hashcol, 1/{=}/alucol, 2/{Read(z)}/memcol,
+    3/{Poseidon}/poscol, 4/{=}/alucol, 5/{Poseidon}/poscol%
+  } {
+    \node[ibox, fill=\col] at (\rx, {\segBy+\n*\rh}) {\txt};
+  }
+  %
+  \pgfmathsetmacro{\segBtop}{\segBy - 0.1}
+  \pgfmathsetmacro{\segBbot}{\segBy + 6*\rh + 0.04}
+  \draw[thin] ({\rx-0.2}, \segBtop) rectangle ({\rx+3.8+0.11+0.2}, \segBbot);
+  \node[seglabel] at ({\rx+3.8+0.11+0.4}, {(\segBtop+\segBbot)/2}) {Segment 2};
+  %
+  % --- Cross-segment state 2 ---
+  \pgfmathsetmacro{\isBy}{\segBbot + 0.14}
+  \node[sbox] at (\rcx, \isBy) {Cross-segment state};
+  %
+  % --- Segment 3 ---
+  \pgfmathsetmacro{\segCy}{\isBy + 0.58}
+  \foreach \n/\txt/\col in {
+    0/{Keccak}/hashcol, 1/{Read(w)}/memcol,
+    2/{\textgreater\textgreater}/alucol, 3/{Write(w)}/memcol,
+    4/{=}/alucol, 5/{Return}/retcol%
+  } {
+    \node[ibox, fill=\col] at (\rx, {\segCy+\n*\rh}) {\txt};
+  }
+  %
+  \pgfmathsetmacro{\finalY}{\segCy + 6*\rh + 0.05}
+  \node[sbox] at (\rcx, \finalY) {Final state};
+  %
+  \pgfmathsetmacro{\segCtop}{\segCy - 0.1}
+  \pgfmathsetmacro{\segCbot}{\finalY + 0.42}
+  \draw[thin] ({\rx-0.2}, \segCtop) rectangle ({\rx+3.8+0.11+0.2}, \segCbot);
+  \node[seglabel] at ({\rx+3.8+0.11+0.4}, {(\segCtop+\segCbot)/2}) {Segment 3};
+\end{tikzpicture}%
+}
+\caption{Segmentation of the execution trace into 3 segments }\label{img:trace-seg}
+\end{figure}
+
+After execution, the execution trace $\TTT$ is divided into segments $\GGG_1,\GGG_2,\ldots,\GGG_m$
+of exactly $N_{\text{seg}}$ instructions\footnote{The instruction
+set has a no-op instruction to pad the segment to the full length.
+The parameter $N_{\text{seg}}$ is assumed to be hardcoded and fixed, and known to the verifier.} each (cf. Fig. \ref{img:trace-seg}). Each segment $\GGG_i$ corresponds to a contiguous
+subsequence of the execution trace, from $S_{start_i}$ to $S_{end_i}$, and is proven by a set of separate
+proofs.
+The segmentation of the execution trace into consecutive segments
+allows reducing the proof of the entire execution to proving the validity of each segment
+and consistency between them. The global consistency argument asserts that the segments are consistent with each other
+and with the public inputs/outputs:
+$$
+S_{end_i} = S_{start_{i+1}}\text{ for all }i\in[m-1],\quad S_{start_1}=S_0,\quad S_{end_m}=S_T.
+$$
+
+\subsection{Segment layout}
+
+Each segment is represented in an equivalent form as a collection of one trace and several
+\emph{chips}, listed below (cf.\ Fig.~\ref{img:segments}).
+
+
+\paragraph{Segment trace}
+It consists of all  operations of the execution trace within
+the segment and state variables, including the program counter, register values, memory state, etc.
+It is a collection of $N_{\text{seg}}$ rows, each corresponding to one instruction step
+from the segment. The segment trace does not enforce the semantics of all instructions,
+but only a subset of them, and the rest of the instructions are proven
+in separate chips  and their consistency with the segment trace is enforced by
+\emph{consistency arguments}.
+
+\paragraph{Keccak chip}  It consists of all Keccak precompile calls in the segment, and their inputs/outputs.
+
+\paragraph{Poseidon chip}
+It consists of all Poseidon precompile calls in the segment, and their inputs/outputs.
+
+\paragraph{Range check chip}
+It consists of all range check statements occurring in the segment.
+
+\paragraph{Local consistency argument}$\phantom{=}$
+
+\begin{instruction}
+  Teams should describe how their bus consistency argument works in terms of lookups used and how they integrate into the overall proof system.
+\end{instruction}
+
+The consistency arguments enforce that the operations proven in the chips are consistent
+with the segment trace. This is done using the concept of a \emph{bus} connecting the segment trace and the chips,
+and lookup arguments to enforce consistency of the bus values with the segment trace and the chip traces.
+
+\begin{figure}
+\centering
+\resizebox{0.65\textwidth}{!}{%
+\begin{tikzpicture}[y=-1cm]
+  % Colors
+  \definecolor{alucol}{RGB}{195,195,235}
+  \definecolor{memcol}{RGB}{185,225,185}
+  \definecolor{hashcol}{RGB}{205,205,205}
+  \definecolor{poscol}{RGB}{245,215,175}
+  \definecolor{statecol}{RGB}{255,255,100}
+  \definecolor{buscol}{RGB}{255,195,115}
+  %
+  \def\rh{0.46}
+  %
+  \tikzset{
+    ibox/.style={draw, thin, minimum height=\rh cm, text width=3.2cm, inner sep=2pt,
+                 anchor=north west, font=\footnotesize\sffamily},
+    chip/.style={draw, thick, rounded corners=4pt, minimum width=2.6cm, minimum height=0.8cm,
+                 font=\footnotesize\sffamily\bfseries, align=center},
+    sbar/.style={draw, thin, rounded corners=2pt, fill=statecol,
+                 minimum height=0.42cm, minimum width=10.2cm,
+                 font=\footnotesize\sffamily},
+  }
+  %
+  % Layout constants
+  \def\tx{0.4}     % trace x
+  \def\trw{3.34}   % trace box total width (3.2 text + 0.14 inner sep)
+  \def\busx{5.2}   % bus x (shifted right for arrow space)
+  \def\busw{1.2}   % bus width
+  \def\ty{1.25}    % trace y start
+  \def\bsy{2.0}    % bus start y (shorter than trace)
+  %
+  % === BIG ENCLOSING BOX ===
+  \draw[semithick, rounded corners=6pt] (0, 0) rectangle (10.8, 5.7);
+  %
+  % === INITIAL STATE BAR ===
+  \node[sbar] at (5.4, 0.35) {Initial segment state};
+  %
+  % === COLUMN LABELS ===
+  \node[font=\footnotesize\sffamily\bfseries] at (2.15, 0.88) {Segment Trace};
+  \node[font=\footnotesize\sffamily\bfseries] at ({\busx + \busw/2}, 0.88) {Bus};
+  %
+  % === INSTRUCTION ROWS (color-coded by chip affiliation) ===
+  \foreach \n/\txt/\col in {
+    0/{+}/alucol,
+    1/{Keccak}/hashcol,
+    2/{=}/alucol,
+    3/{Read(z)}/memcol,
+    4/{Poseidon}/poscol,
+    5/{=}/alucol,
+    6/{Poseidon}/poscol,
+    7/{Exp}/alucol%
+  } {
+    \node[ibox, fill=\col] at (\tx, {\ty+\n*\rh}) {\txt};
+  }
+  %
+  % === BUS COLUMN (only precompile/range-check entries, colored by chip) ===
+  % 4 cells: Keccak, Poseidon, Poseidon, Range check
+  \fill[hashcol]  (\busx, \bsy) rectangle ({\busx+\busw}, {\bsy+\rh});
+  \fill[poscol]   (\busx, {\bsy+\rh}) rectangle ({\busx+\busw}, {\bsy+2*\rh});
+  \fill[poscol]   (\busx, {\bsy+2*\rh}) rectangle ({\busx+\busw}, {\bsy+3*\rh});
+  \fill[cyan!20]  (\busx, {\bsy+3*\rh}) rectangle ({\busx+\busw}, {\bsy+4*\rh});
+  % Grid
+  \draw[thin] (\busx, \bsy) rectangle ({\busx+\busw}, {\bsy+4*\rh});
+  \foreach \n in {1,2,3} {
+    \draw[thin, black!25] (\busx, {\bsy+\n*\rh}) -- ({\busx+\busw}, {\bsy+\n*\rh});
+  }
+  %
+  % === ARROWS: TRACE → BUS ===
+  \pgfmathsetmacro{\trR}{\tx + \trw}  % trace right edge
+  % Keccak (trace row 1) → bus cell 0
+  \draw[->, thick, hashcol!70!black] (\trR, {\ty+1*\rh+\rh/2}) -- (\busx, {\bsy+\rh/2});
+  % Poseidon (trace row 4) → bus cell 1
+  \draw[->, thick, poscol!70!black] (\trR, {\ty+4*\rh+\rh/2}) -- (\busx, {\bsy+\rh+\rh/2});
+  % Poseidon (trace row 6) → bus cell 2
+  \draw[->, thick, poscol!70!black] (\trR, {\ty+6*\rh+\rh/2}) -- (\busx, {\bsy+2*\rh+\rh/2});
+  % Exp/range check (trace row 7) → bus cell 3
+  \draw[->, thick, cyan!70!black] (\trR, {\ty+7*\rh+\rh/2}) -- (\busx, {\bsy+3*\rh+\rh/2});
+  %
+  % === FINAL STATE BAR ===
+  \node[sbar] at (5.4, 5.3) {Final segment state};
+  %
+  % === CHIP BOXES (spread across full trace height) ===
+  \node[chip, fill=hashcol!70] (sha3chip) at (8.9, 1.7) {Keccak chip};
+  \node[chip, fill=poscol!70] (poschip) at (8.9, 3.1) {Poseidon chip};
+  \node[chip, fill=cyan!20] (rangechip) at (8.9, 4.5) {Range check chip};
+  %
+  % === ARROWS: BUS → CHIPS (bidirectional) ===
+  \draw[<->, thick] ({\busx+\busw}, {\bsy+\rh/2}) -- (sha3chip.west);
+  \draw[<->, thick] ({\busx+\busw}, {\bsy+2*\rh}) -- (poschip.west);
+  \draw[<->, thick] ({\busx+\busw}, {\bsy+3*\rh+\rh/2}) -- (rangechip.west);
+  %
+\end{tikzpicture}%
+}
+\caption{Segment structure: segment trace connects to the bus which then connects to chips.}\label{img:segments}
+\end{figure}
+
+\section{Correct execution of a program}
+In this section, we define via predicates what it means that a program is correctly executed. We will use these predicates in Section~\ref{sec:proof-arch} to define the relations that the zkVM proves.
+
+\subsection{Predicates for individual operations}
+
+\begin{instruction}
+Teams should list all operations supported by their zkVM and define the corresponding predicates based on their architecture.
+\end{instruction}
+
+Each operation is treated as a black box with its
+own predicate $\varphi_{op}$ (cf. ~\eqref{eq:phiop}).
+Throughout this section, subscripts $1$ and $2$ denote states before and after an operation.
+We also denote $S_1:=(\pc_1,\regs_1,\mem_1)$ and
+$S_2:=(\pc_2,\regs_2,\mem_2)$ as the states
+before and after the operation.
+
+We group operations as follows:
+\begin{itemize}
+	\item \textbf{Memory operations.}
+	Read: $\pred{read}(S_1,S_2)$ --- does not modify memory.
+	Write: $\pred{write}(S_1,S_2)$ --- may modify memory.
+	\item \textbf{Precompiles.}
+	Keccak: $\pred{keccak}(S_1,S_2)$.
+	Poseidon: $\pred{poseidon}(S_1,S_2)$.
+	 \item \textbf{Arithmetic without range checks.} $\op_1,\ldots,\op_{10}$
+	 with predicates $
+   \pred{\op_i}(S_1,S_2)$.
+	 \item \textbf{Arithmetic with range checks.} $\op_{11},\ldots,\op_{20}$
+	 with predicates $\pred{\op_i}(S_1,S_2)$, each decomposable as
+	 $\pred{\op_i}'(S_1,S_2)\wedge \pred{range}(S_1)$
+	 where the constants defining the range check are always in the
+   last two registers.
+\end{itemize}
+All operations except $\rea$ and $\writ$  do not read or write memory,
+  so we may omit these arguments from their predicates in
+   the future text for brevity.
+\subsection{Correct execution of a single step}
+
+\begin{instruction}
+Teams should define the step predicate for their architecture, specifying how the correct operation is selected and verified at each step.
+\end{instruction}
+
+A single step executes the instruction at the current program counter.
+The step predicate selects the matching operation via a disjunction over all opcodes:
+\begin{equation*}\label{eq:step}
+\varphi_{step}(S_1,S_2):=
+\bigvee_{op\in \text{operations}} \varphi_{op}(S_1,S_2)
+\end{equation*}
+where $S_1:=(\pc_1,\regs_1,\mem_1)$ and $S_2:=(\pc_2,\regs_2,\mem_2)$ are the states before and after the step.
+
+\subsection{Delegating expensive operations using a Bus}
+
+\begin{instruction}
+Teams should describe how expensive operations (e.g., precompiles, range checks) are delegated to a bus or similar mechanism in their architecture.
+\end{instruction}
+
+Range checks and precompile calls are expensive to prove inline.
+Instead, we collect them in a shared \emph{bus} $\BBB$
+and verify separately, proving the consistency along the way.
+The \emph{bus} $\BBB$ is a collection of  all
+precompile calls and range checks within a segment. That is, it has the following structure:
+$$
+\BBB=\{(\underbrace{\op^{(i)}}_{\in\{\keccak,\poseidon\}},
+S_1^{(i)},S_2^{(i)})\}_{i=1}^{b}\;\cup\;
+\{(\range,S^{(j)} )\}_{j=1}^{r}
+$$
+where $b$ is the number of precompile calls and $r$ is the number of range checks.
+
+
+Now we define auxiliary predicates that filter the bus by operation type
+and assert correctness of each entry:
+$\pred{\keccak}(\BBB)$ checks all Keccak entries,
+$\pred{\poseidon}(\BBB)$ checks all Poseidon entries,
+and $\pred{\range}(\BBB)$ checks all range-check entries.
+Concretely:
+\begin{align*}
+\pred{\keccak}(\BBB)&:=
+\bigwedge_{( \keccak,S_1,S_2)\in\BBB}
+\pred{keccak}(S_1,S_2)\\
+\pred{\poseidon}(\BBB)&:=
+\bigwedge_{( \poseidon,S_1,S_2)\in\BBB}
+\pred{poseidon}(S_1,S_2)\\
+\pred{\range}(\BBB)&:=
+\bigwedge_{( \range,S)\in\BBB}
+\pred{\range}(S)
+\end{align*}
+
+We now rewrite the step predicate \eqref{eq:step} to separate
+inline verification from bus-deferred verification.
+The new form is equivalent\footnote{Formally the new predicate is even stronger
+as it also asserts the correctness of the operations in $\BBB$ not listed
+in the segment.
+ We omit checking for such operations for efficiency.}:
+\begin{equation}\label{eq:step-expanded}
+  \pred{step}(S_1,S_2,\BBB):=
+\pred{step,bus}(S_1,S_2,\BBB)
+\wedge \pred{\keccak}(\BBB)\wedge \pred{\poseidon}(\BBB) \wedge \pred{\range}(\BBB)
+\end{equation}
+where
+\begin{multline}
+	\pred{step,bus}(S_1,S_2,\BBB):=
+\bigvee_{op\in \{\rea,\writ,\op_1, \ldots,\op_{10}\}}
+\left(\pred{op}(S_1,S_2)
+\right)\\
+\bigvee_{op\in \{\op_{11}, \ldots,\op_{20}\}}
+ \left(\pred{op}'(S_1,S_2)
+\wedge (\range,S_1)\in\BBB\right)\\
+\bigvee_{op\in \{\text{Keccak},\text{Poseidon}\}} \left((op,S_1,S_2)\in\BBB\right)
+\end{multline}
+Recall that $S_1:=(\pc_1,\regs_1,\mem_1)$ and $S_2:=(\pc_2,\regs_2,\mem_2)$.
+The predicate $\pred{step,bus}$ separates operations into three categories:
+\begin{itemize}
+\item \textbf{Memory ops and arithmetic without range checks} ($\rea,\writ,\op_1,\ldots,\op_{10}$) are verified inline via their predicates.
+\item \textbf{Arithmetic with range checks} ($\op_{11},\ldots,\op_{20}$): the arithmetic logic $\pred{op}$ is verified inline, but the range check is deferred by recording $(\range,S_1)$ in~$\BBB$.
+\item \textbf{Precompiles} (Keccak, Poseidon) are fully deferred --- the step only checks that the call appears in~$\BBB$, while correctness will be verified by $\pred{\keccak}(\BBB)$, $\pred{\poseidon}(\BBB)$ in~\eqref{eq:step-expanded}.
+\end{itemize}
+\subsection{Committed memory}
+
+\begin{instruction}
+Teams should describe how memory is committed
+and how memory operations are verified in their architecture.
+\end{instruction}
+
+The full memory state is too large to pass around directly,
+so we replace it with the Merkle tree commitment $\Com$.
+We define a \emph{state with committed memory} $\hat{S}:=(\pc,\regs,\Com)$,
+replacing the full memory in $S:=(\pc,\regs,\mem)$ with its commitment.
+
+The read operation predicate becomes
+$$\widehat{\pred{}}_{\rea}(\pc_1,\regs_1,\Com_1,\pc_2,\regs_2,\Com_2)$$
+with $\Com_1=\Com_2$, and the write operation predicate becomes
+$$\widehat{\pred{}}_{\writ}(\pc_1,\regs_1,\Com_1,\pc_2,\regs_2,
+\Com_2)$$
+with additional semantics that
+the read and write operations are consistent with the commitments.
+
+
+
+Replacing memory with commitments in \eqref{eq:step-expanded}
+ gives the step relation:
+\begin{equation}\label{eq:step-bus2}
+  \widehat{\pred{}}_{step}(\hat{S}_1,\hat{S}_2,\widehat{\BBB})
+ :=\widehat{\pred{}}_{step,bus}(\hat{S}_1,\hat{S}_2,\widehat{\BBB})
+\wedge  \widehat{\pred{}}_{\keccak}(\widehat{\BBB})\wedge \widehat{\pred{}}_{\poseidon}(\widehat{\BBB}) \wedge \widehat{\pred{}}_{\range}(\widehat{\BBB})
+\end{equation}
+where $\widehat{\BBB}$ replaces the memory entries with
+committed memory (which is practically invisible as
+the bus operations do not use memory), $\widehat{\pred{}}_{\keccak}$, $\widehat{\pred{}}_{\poseidon}$,
+ $\widehat{\pred{}}_{\range}$ are essentially unchanged as those relations
+ do not use memory, and $\widehat{\pred{}}_{step,bus}$ are
+defined analogously to $\pred{step,bus}$
+but with all operation predicates replaced
+by their committed-memory versions:
+\begin{multline}
+	\widehat{\pred{}}_{step,bus}(\hat{S}_1,\hat{S}_2,\widehat{\BBB}):=
+\bigvee_{op\in \{\rea,\writ,\op_1,\op_2,\ldots,\op_{10}\}}
+\left(\widehat{\pred{}}_{op}(\hat{S}_1,\hat{S}_2)
+\right)\\
+\bigvee_{op\in \{\op_{11},\op_{12},\ldots,\op_{20}\}}
+ \left(\widehat{\pred{}}_{op}'(\hat{S}_1,\hat{S}_2)
+\wedge (\range,\hat{S}_1)\in\widehat{\BBB}\right)\\
+\bigvee_{op\in \{\text{Keccak},\text{Poseidon}\}} \left((op,\hat{S}_1,\hat{S}_2)\in\widehat{\BBB}\right)
+\end{multline}
+
+
+Note that \eqref{eq:step-expanded} and \eqref{eq:step-bus2} are no longer equivalent (in terms of soundness)
+as the second one uses committed memory instead of the actual memory.
+
+
+
+\section{Proof Architecture}\label{sec:proof-arch}
+We now define relations that are proven using individual SNARKs, and that recursively combine into the final proof.
+
+\subsection{Topology}
+
+The proof pipeline consists of multiple circuit types.
+
+\begin{instruction}
+Teams should add footnotes to each circuit subsection below linking to the corresponding soundcalc entry for that circuit's parameters and security analysis.
+\end{instruction}
+
+Below we expose some aggregate information.
+
+\begin{center}
+\begin{tabular}{lccc}
+\hline
+\textbf{Circuit} & \textbf{Purpose} & Relations\\
+\hline
+\multicolumn{3}{l}{\emph{Inner segment circuits (leaf layer):}}\\
+\quad\texttt{inner-step} & Segment trace & $\relation_{0,\step}$ \\
+\quad\texttt{inner-keccak} & Keccak precompile & $\relation_{0,\keccak}$ \\
+\quad\texttt{inner-poseidon} & Poseidon precompile & $\relation_{0,\poseidon}$ \\
+\quad\texttt{inner-range} & Range checks & $\relation_{0,\range}$ \\
+\hline
+\texttt{segment}   & Segment proof       & $\relation_1$ \\
+\texttt{convert}  & 1-to-1 normalization & $\relation_2$ \\
+\texttt{combine}  & 2-to-1 merge     & $\relation_3$ \\
+\texttt{embed}    & final proof      & $\relation_4$ \\
+\hline
+\end{tabular}
+\end{center}
+
+
+\begin{itemize}
+  \item \emph{Inner segment circuits (leaf layer).} These four circuits jointly prove one segment; the \texttt{segment} circuit below verifies all four.
+  \begin{itemize}[label=$\cdot$]
+    \item \texttt{inner-step}: Proves the segment trace execution (with precompiles and range checks excluded).
+    \item \texttt{inner-keccak}: Proves the Keccak precompile.
+    \item \texttt{inner-poseidon}: Proves the Poseidon precompile.
+    \item \texttt{inner-range}: Proves the range checks.
+  \end{itemize}
+	\item \texttt{segment}: Verifies the four inner proofs, effectively proving one segment
+	\item \texttt{convert}: A 1-to-1 recursion circuit that verifies a single \texttt{segment} proof.
+	\item \texttt{combine}: A recursive 2-to-1 circuit that verifies two child proofs, each of which may be either a \texttt{convert} or a \texttt{combine} proof.
+	\item \texttt{embed}: The circuit that produces the final proof.
+\end{itemize}
+
+
+We visualize the recursion topology in Fig.~\ref{fig:topo}. Here,
+$\pi^{\mathbf{0}}$ denotes the four inner proofs (one each for $\relation_{0,\step}$, $\relation_{0,\keccak}$, $\relation_{0,\poseidon}$, $\relation_{0,\range}$),
+ $\pi^1$ are proofs of $\relation_1$ and thus the \texttt{segment} circuit. Similarly, $\pi^2$ proves the \texttt{convert} circuit, $\pi^3$ the \texttt{combine} circuit, and $\pi^4$ the \texttt{embed} circuit.
+
+\begin{figure}
+	\centering
+	\begin{tikzpicture}[
+		every node/.style={draw, rounded corners=2pt, minimum width=1.2em, minimum height=1.2em, inner sep=1.5pt, font=\scriptsize},
+		embed/.style={fill=purple!15},
+		combine/.style={fill=blue!12},
+		convert/.style={fill=orange!15},
+		riscv/.style={fill=green!12},
+    base/.style={fill=yellow!10},
+		level 1/.style={sibling distance=130mm},
+		level 2/.style={sibling distance=65mm},
+		level 3/.style={sibling distance=32mm},
+		level 4/.style={sibling distance=16mm},
+		level 5/.style={sibling distance=4mm},
+		level 6/.style={sibling distance=1mm},
+		level distance=11mm,
+		edge from parent/.style={draw, thin},
+		]
+		\node [embed] {$\pi^{4}$}
+		child { node [combine] {$\pi^{3}$}
+			child {
+				node [combine] {$\pi^{3}_{\bf 0}$}
+				child {
+					node [combine] {$\pi^{3}_{\bf 00}$}
+					child { node [convert] {$\pi^{2}_{\bf 000}$}
+						child { node [riscv] {$\pi^{1}_{\bf 000}$}
+							child { node [base] {} }
+							child { node [base] {} }
+							child { node [base] {} }
+							child { node [base] {$\pi^{\mathbf{0}}_{\bf 000}$} }
+						}
+					}
+					child { node [convert] {$\pi^{2}_{\bf 001}$}
+						child { node [riscv] {$\pi^{1}_{\bf 001}$}
+							child { node [base] {} }
+							child { node [base] {} }
+							child { node [base] {} }
+							child { node [base] {$\pi^{\mathbf{0}}_{\bf 001}$} }
+						}
+					}
+				}
+				child {
+					node [combine] {$\pi^{3}_{\bf 01}$}
+					child { node [convert] {$\pi^{2}_{\bf 010}$}
+						child { node [riscv] {$\pi^{1}_{\bf 010}$}
+							child { node [base] {} }
+							child { node [base] {} }
+							child { node [base] {} }
+							child { node [base] {$\pi^{\mathbf{0}}_{\bf 010}$} }
+						}
+					}
+					child { node [convert] {$\pi^{2}_{\bf 011}$}
+						child { node [riscv] {$\pi^{1}_{\bf 011}$}
+							child { node [base] {} }
+							child { node [base] {} }
+							child { node [base] {} }
+							child { node [base] {$\pi^{\mathbf{0}}_{\bf 011}$} }
+						}
+					}
+				}
+			}
+			child {
+				node [combine] {$\pi^{3}_{\bf 1}$}
+				child {
+					node [combine] {$\pi^{3}_{\bf 10}$}
+					child { node [convert] {$\pi^{2}_{\bf 100}$}
+						child { node [riscv] {$\pi^{1}_{\bf 100}$}
+							child { node [base] {} }
+							child { node [base] {} }
+							child { node [base] {} }
+							child { node [base] {$\pi^{\mathbf{0}}_{\bf 100}$} }
+						}
+					}
+					child { node [convert] {$\pi^{2}_{\bf 101}$}
+						child { node [riscv] {$\pi^{1}_{\bf 101}$}
+							child { node [base] {} }
+							child { node [base] {} }
+							child { node [base] {} }
+							child { node [base] {$\pi^{\mathbf{0}}_{\bf 101}$} }
+						}
+					}
+				}
+				child {
+					node [combine] {$\pi^{3}_{\bf 11}$}
+					child { node [convert] {$\pi^{2}_{\bf 110}$}
+						child { node [riscv] {$\pi^{1}_{\bf 110}$}
+							child { node [base] {} }
+							child { node [base] {} }
+							child { node [base] {} }
+							child { node [base] {$\pi^{\mathbf{0}}_{\bf 110}$} }
+						}
+					}
+					child { node [convert] {$\pi^{2}_{\bf 111}$}
+						child { node [riscv] {$\pi^{1}_{\bf 111}$}
+							child { node [base] {} }
+							child { node [base] {} }
+							child { node [base] {} }
+							child { node [base] {$\pi^{\mathbf{0}}_{\bf 111}$} }
+						}
+					}
+				}
+			}
+		};
+	\end{tikzpicture}
+	\caption{\label{fig:topo} Recursion topology. Colors: \colorbox{yellow!10}{\texttt{inner}}, \colorbox{green!12}{\texttt{segment}}, \colorbox{orange!15}{\texttt{convert}}, \colorbox{blue!12}{\texttt{combine}}, \colorbox{purple!15}{\texttt{embed}}.}
+\end{figure}
+
+\subsection{\texttt{inner} circuits}
+
+To optimize the proof size and prover time,
+we introduce inner segment circuits that prove
+the correctness of the segment trace, of precompiles,
+and of range checks separately. As those
+circuits share the same bus, we commit to the latter
+to make the relations succinct.
+These circuits are then recursively
+combined  to prove the correctness of the full segment.
+
+The first relation $\relation_{0,\step}$ chains
+$N_{\text{seg}}$ consecutive valid steps
+from $\hat{S}_{in}$ to $\hat{S}_{out}$,
+with the bus committed in the public input.
+The remaining three relations each assert correctness of
+all entries of a given type in the bus
+(Keccak, Poseidon, or range checks respectively),
+again with the bus committed\footnote{Without loss
+of generality we assume that the same commitment scheme is used for the bus.} in the public input.
+\begin{align}
+  \relation_{0,\step} &=\left(
+   \left((\hat{S}_{in},
+	\hat{S}_{out}, \Com_B );\;
+  (\widehat{\BBB},\{\hat{S}_i\}_{1\leq i \leq {N_{\text{seg}}}+1})\right)\;\Bigg|\quad
+  \begin{array}{c}
+    \hat{S}_1 = \hat{S}_{in}\\
+    \hat{S}_{N_{\text{seg}}+1} = \hat{S}_{out}\\
+    \bigwedge_{i=1}^{N_{\text{seg}}} \widehat{\pred{}}_{step,bus} (\hat{S}_i,\hat{S}_{i+1},\widehat{\BBB})=\mathrm{TRUE}\\
+    \Com_B = \Com(\widehat{\BBB})
+  \end{array}
+ \right)\\
+  \relation_{0,\keccak} &=\left(
+   \left(( \Com_B );\;
+  (\widehat{\BBB} )\right)\;\Bigg|\quad
+  \begin{array}{c}
+    \widehat{\pred{}}_{\keccak}(\widehat{\BBB})=\mathrm{TRUE}\\
+    \Com_B = \Com(\widehat{\BBB})
+  \end{array}
+ \right)\\
+  \relation_{0,\poseidon} &=\left(
+   \left(( \Com_B );\;
+  (\widehat{\BBB} )\right)\;\Bigg|\quad
+  \begin{array}{c}
+    \widehat{\pred{}}_{\poseidon}(\widehat{\BBB})=\mathrm{TRUE}\\
+    \Com_B = \Com(\widehat{\BBB})
+  \end{array}
+ \right)\\
+   \relation_{0,\range} &=\left(
+   \left(( \Com_B );\;
+  (\widehat{\BBB} )\right)\;\Bigg|\quad
+  \begin{array}{c}
+    \widehat{\pred{}}_{\range}(\widehat{\BBB})=\mathrm{TRUE}\\
+    \Com_B = \Com(\widehat{\BBB})
+  \end{array}
+ \right)
+\end{align}
+
+The circuits are called, respectively,
+\texttt{inner-step}, \texttt{inner-keccak}, \texttt{inner-poseidon}, and \texttt{inner-range}.
+\begin{instruction}
+Note that our writeup is a bit informal here, as we never formally defined $\Com$. Teams should do that, as the security analysis later will require a specific binding notion of $\Com$.
+\end{instruction}
+
+\subsection{ \texttt{segment} circuit}
+
+The \texttt{segment} circuit recursively verifies the four inner proofs,
+tying them together via a shared bus commitment $\Com_B$.
+Let $\Pi_{0,j}=(\Pi_{0,j}.\mathsf{Prove}, \Pi_{0,j}.\mathsf{Verify})$
+be the SNARK for $\relation_{0,j}$, where $j\in\{\step,\keccak,\poseidon,\range\}$.
+
+$$\relation_1=\left\lbrace\begin{array}{c|c} (\hat{S}_{in},
+	\hat{S}_{out});(\Com_B,\pi_\step,\pi_\keccak,\pi_\poseidon,\pi_\range) &
+  \begin{array}{c}
+	\Pi_{0,\step}.\mathsf{Verify}((\hat{S}_{in},\, \hat{S}_{out},\, \Com_B), \pi_\step)=1\\
+  \Pi_{0,\keccak}.\mathsf{Verify}( \Com_B, \pi_\keccak)=1\\
+  \Pi_{0,\poseidon}.\mathsf{Verify}( \Com_B, \pi_\poseidon)=1\\
+  \Pi_{0,\range}.\mathsf{Verify}( \Com_B, \pi_\range)=1
+  \end{array}
+\end{array}\right\rbrace$$
+
+
+\subsection{\texttt{convert} circuit}
+
+The \texttt{convert} circuit is a 1-to-1 recursion circuit that consumes a proof of $\relation_1$ and verifies it.  Its public
+inputs are the boundary states and the segment size; its witness is the proof $\pi_1$. To formally define the relation,
+let $\Pi_1=(\Pi_1.\mathsf{Prove}, \Pi_1.\mathsf{Verify})$ be the STARK proving protocol for relation $\relation_1$.
+
+$$\relation_2=\left\lbrace\begin{array}{c|c}
+	((\hat{S}_0,\, \hat{S}_N,\, {N_{\text{seg}}});\; \pi_1) &
+	\Pi_1.\mathsf{Verify}((\hat{S}_0,\, \hat{S}_N), \pi_1)=1
+\end{array}\right\rbrace$$
+Note that triples for which the last component is not ${N_{\text{seg}}}$ are never in $\relation_2$.
+
+\subsection{\texttt{combine} circuit}
+
+The \texttt{combine} circuit is a recursive 2-to-1 circuit that verifies two child proofs, each of which may be either a \texttt{convert} proof or another \texttt{combine} proof.
+It checks three things:
+\begin{itemize}
+\item Each child proof is valid under either $\Pi_2.\mathsf{Verify}$ or $\Pi_3.\mathsf{Verify}$, where $\Pi_i=(\Pi_i.\mathsf{Prove}, \Pi_i.\mathsf{Verify})$ is the STARK proving protocol for relation $\relation_i$.
+\item The step counts satisfy $N_L + N_R = N$, with $N_L \geq 1$ and $N_R \geq 1$ to ensure well-founded recursion.
+\item State continuity: the witness $\hat{S}_N^L$ serves as both the final state of the left proof and the initial state of the right proof.
+\end{itemize}
+Since \texttt{combine} is self-recursive, repeated binary application naturally reduces any number of segment proofs into a single proof $\pi_3$ for the full execution.
+
+For brevity, we write $\Vfy_i(\mathsf{x},\pi):=\Pi_i.\mathsf{Verify}(\mathsf{x},\pi)$.
+$$\relation_3=\left\lbrace\begin{array}{c|c}
+	((\hat{S}_0^L,\, \hat{S}_N^R,\, N);\; (\pi^L,\, \pi^R,\, \hat{S}_N^L, N_L, N_R)) &
+  \begin{array}{c}
+	\Vfy_2((\hat{S}_0^L, \hat{S}_N^L, N_L),\, \pi^L)=1
+	\;\lor\; \Vfy_3((\hat{S}_0^L, \hat{S}_N^L, N_L),\, \pi^L)=1 \\
+	\Vfy_2((\hat{S}_N^L, \hat{S}_N^R, N_R),\, \pi^R)=1
+	\;\lor\; \Vfy_3((\hat{S}_N^L, \hat{S}_N^R, N_R),\, \pi^R)=1 \\
+	N_L + N_R = N \\
+	N_L \geq 1,\; N_R \geq 1
+  \end{array}
+\end{array}\right\rbrace$$
+
+where $\hat{S}_0^L$ and $\hat{S}_N^R$ are the public boundary states of the combined execution,
+$\pi^L$ and $\pi^R$ are the two child proofs (each either a \texttt{convert} or \texttt{combine} proof), and $\hat{S}_N^L$ is the intermediate boundary state provided as witness.
+
+\subsection{\texttt{embed} circuit}
+
+The \texttt{embed} circuit produces the final proof, asserting correctness of the entire program execution
+with public initial and final states. It assumes that
+the total step count $T$ is known in advance to the verifier.
+Let $\Pi_3=(\Pi_3.\mathsf{Prove}, \Pi_3.\mathsf{Verify})$ be the STARK proving protocol for relation $\relation_3$.
+
+$$\relation_4=\left\lbrace\begin{array}{c|c}
+	((\hat{S}_0,\, \hat{S}_T);\; \pi_3) &
+	\Pi_3.\mathsf{Verify}((\hat{S}_0,\, \hat{S}_T,\,T),\, \pi_3)=1
+\end{array}\right\rbrace$$
+
+where $\hat{S}_0$ and $\hat{S}_T$ are the initial and final states of the entire program execution.
+
+
+\section{Proof system instantiations}
+
+\begin{instruction}
+  Teams should explain how the relations are proven using AIR / IOPs / poly-IOPs and the BCS transform. That is, teams should provide a direct reduction
+from proving a relation to a low-degree test with
+  FRI or another protocol. The reductions should contain links to the circuits submitted to soundcalc.
+  The purpose of the section is to make explicit how the relations from the previous section are proven.
+\end{instruction}
+
+\end{document}
