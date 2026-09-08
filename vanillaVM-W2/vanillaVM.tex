@@ -1,0 +1,46 @@
+\documentclass[11pt]{article}
+
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{geometry,comment}
+\usepackage{xcolor}
+\usepackage[normalem]{ulem}
+\geometry{margin=1in}
+\usepackage{tikz}
+\usepackage{tikz-cd}
+\usepackage{pgfplots}
+\usepackage[binary-units=true]{siunitx}
+\usepackage{graphicx}
+\usepackage[font=small]{caption}
+\usepackage[most]{tcolorbox}
+
+\title{A Vanilla zkVM Architecture}
+\author{George Kadianakis\quad Dmitry Khovratovich\quad Benedikt Wagner\quad Arantxa Zapico\\[8pt]
+{\normalsize Ethereum Foundation Cryptography Research}}
+
+\input{macros.tex}
+\begin{document}
+
+\maketitle
+
+\begin{instruction}
+This document is a reference example illustrating the expected scope and level of rigor. It is not meant to describe a zkVM that is implementable and efficient, and the described zkVM may not even be sound (we provide a best-effort security proof in Section~\ref{sec:security} that has not been peer-reviewed and (over-)idealizes certain aspects). Submitted documents should provide additional detail where applicable.
+\end{instruction}
+
+\input{ch00-overview.tex}
+\input{ch01-execution-model.tex}
+\input{ch02-segmentation.tex}
+\input{ch03-correct-execution.tex}
+\input{ch04-proof-architecture.tex}
+\input{ch05-security.tex}
+
+\begin{thebibliography}{9}
+\bibitem{EPRINT:relativized}
+  Annalisa Barbara, Alessandro Chiesa, and Ziyi Guan.
+  \newblock Relativized Succinct Arguments in the {ROM} Do Not Exist.
+  \newblock Cryptology ePrint Archive, Paper 2024/728, 2024.
+  \newblock \url{https://eprint.iacr.org/2024/728}. (TCC 2025.)
+\end{thebibliography}
+
+\end{document}

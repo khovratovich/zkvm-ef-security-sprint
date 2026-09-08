@@ -1,0 +1,138 @@
+\section{Execution Model}
+We define how a program is executed.
+
+\subsection{Program, Execution, and VM State}
+
+A \textbf{program} $\PPP$ is a fixed RV+ binary, compiled from an Ethereum State Transition function.
+Its inputs $\III$ are derived from the Ethereum state (\emph{initial state}), and
+the execution witness $\WWW$,
+and its outputs $\OOO$ are the final Ethereum state (\emph{final state}).
+
+The program $\PPP$ operates on the \textbf{VM state} $S$, defined as concatenation of the following components:
+\begin{itemize}
+\item $\pc$: 32-bit program counter
+\item $\regs[0..k-1]$: list of $k$ 32-bit register values
+\item $\mem[]$: byte-addressed writable memory
+\end{itemize}
+We separately denote the code of the program by $\code$. It is immutable and read-only, and is not part of the VM state.
+
+A single instruction step of the program execution is defined as a transition from
+one VM state to another according to the semantics of the instruction $\op$ retrieved from
+$\code$ at the program counter $\pc_1$. This is denoted as follows:
+\begin{equation}\label{eq:op}
+S:=(\pc_1,\regs_1,\mem_1)\xrightarrow{\op:=\code[\pc_1]} S':=(\pc_2,\regs_2,\mem_2)
+\end{equation}
+For example, if $\op$ is an addition instruction, which adds the first two registers and stores in the third register, then the semantics of the step is defined as
+\begin{align}
+\pc_2&=\pc_1+1,\\
+\regs_2&=\regs_1\text{ except that } \regs_2[2]:=\regs_1[0]+\regs_1[1],\\
+\mem_2&=\mem_1.
+\end{align}
+We will use the notation $(\pc_1,\regs_1,\mem_1)\rightarrow  (\pc_2,\regs_2,\mem_2)$ to denote that $S$ transitions to $S'$ by executing instruction
+ $\op:=\code[\pc_1]$.
+
+
+An \textbf{execution trace} for program $\code$ applied to inputs $\III$ is a sequence of VM states
+
+\[
+\TTT:\quad S_0 \rightarrow S_1 \rightarrow \cdots \rightarrow S_T
+\]
+where each step corresponds to execution of one instruction.
+
+
+A \textbf{zkVM proof} for $(\PPP,\EE,\EE')$,
+where $\EE$ and $\EE'$ are the initial and final Ethereum states, is a SNARK that proves the following:
+$$
+\begin{cases}
+S_0\rightarrow\cdots\rightarrow S_T;\\
+S_0:=(\pc_0:=0,\regs,\mem)\text{ where $\regs,\mem$ are derived from }\EE;\\
+S_T:=(\pc_T,\regs',\mem')\text{ where $\regs',\mem'$ are derived from }\EE';\\
+\end{cases}
+$$
+
+\subsection{Supported Instructions}
+The zkVM supports the RV+ instruction set, which is an extension of the RV32IM instruction set.
+Concretely, all operations:
+\begin{itemize}
+    \item conform to the state transition \eqref{eq:op}, i.e.
+    transform $(\pc_1,\regs_1,\mem_1)$ to $(\pc_2,\regs_2,\mem_2)$ according to the semantics of the instruction $\op$ retrieved from $\code$ at the program counter $\pc_1$.
+    \item are all standard RISC-V instructions\footnote{\url{https://riscv.org/technical/specifications/}} (executed according to the standard RISC-V semantics)
+     or additional
+    instructions (precompiles) for efficient execution of certain operations --- concretely,
+    Keccak and Poseidon.
+\end{itemize}
+For our purpose the exact semantics of the instructions is not important,
+and we treat them as black boxes with their own predicates modeling the correctness of the execution.
+
+Concretely, for given instruction $op$, the predicate $\varphi_{op}$  has the semantics
+\begin{multline}\label{eq:phiop}
+\varphi_{op}(\pc_1,\regs_1,\mem_1,\pc_2,\regs_2,\mem_2)=\mathrm{TRUE} \;\Longleftrightarrow\;\\
+ (\pc_1,\regs_1,\mem_1)\xrightarrow{\op} (\pc_2,\regs_2,\mem_2) \wedge \code[\pc_1]=op
+\end{multline}
+
+For instance, if $op$ is an ADD instruction, then $\mem_1=\mem_2$, $\pc_1+1=\pc_2$ and the registers change according to the ADD instruction.
+
+
+ Exceptions are memory operations,
+which we assume have the following syntax and semantics:
+\begin{align}
+\rea:\;&(\regs_1:=(addr,*,\ldots),\mem)\rightarrow (\regs_2:=(addr,x,\ldots),\mem),\notag\\
+&\quad \mem[addr]=x,\label{eq:mem-op-read}\\
+\writ:\;&(\regs_1:=(addr,x,\ldots),\mem)\rightarrow (\regs_2:=(addr,x,\ldots),\mem'),\notag\\
+&\quad \mem'[i]=\begin{cases}
+x & \text{if }i=addr,\\
+\mem[i] & \text{otherwise}.
+\end{cases}\label{eq:mem-op-write}
+\end{align}
+
+We decompose each memory predicate into a pc-and-register component
+(independent of memory) and an explicit memory-access equation:
+\begin{multline}
+  \varphi_{\rea}(S_1,S_2) :=
+    \varphi'_{\rea}(\pc_1,\regs_1,\pc_2,\regs_2)
+    \;\wedge\; \mem_1[\regs_1[0]] = \regs_2[1]
+    \;\wedge\; \mem_2 = \mem_1
+  \label{eq:phi-read-decomp}
+\end{multline}
+\begin{multline}
+  \varphi_{\writ}(S_1,S_2) :=
+    \varphi'_{\writ}(\pc_1,\regs_1,\pc_2,\regs_2)
+    \;\wedge\; \mem_2 = \mem_1[\regs_1[0]\mapsto\regs_1[1]]
+  \label{eq:phi-write-decomp}
+\end{multline}
+where $\regs_1[0]$ denotes the address register, $\regs_1[1]$ (resp.\ $\regs_2[1]$)
+the value register before (resp.\ after) the step, and
+$\varphi'_{\rea}$, $\varphi'_{\writ}$ depend only on $\pc$ and $\regs$.
+Both $\varphi'_{\rea}$ and $\varphi'_{\writ}$ include the well-formedness
+conjunct $\regs_1[0]\in[n]$, where $n$ is the number of addressable memory
+cells: without it the expressions $\mem_1[\regs_1[0]]$ and
+$\mem_1[\regs_1[0]\mapsto\regs_1[1]]$ above would be undefined.  The conjunct is
+memory-free, so it is inherited verbatim by the committed-memory versions of the
+two predicates, and it is what lets the security proof treat $\regs_1[0]$ as a
+legal index of the committed vector.
+
+Every pc-and-register part $\varphi'_{op}$ --- of memory and non-memory
+operations alike --- also carries the fetch conjunct $\code[\pc_1]=op$
+of~\eqref{eq:phiop}; the conjunct depends only on $\pc_1$ (the code $\code$ is
+fixed), so it is memory-free and belongs in $\varphi'_{op}$.  This placement is
+load-bearing: the security analysis (Remark~\ref{rem:mem-ext-hyp4}) relies on
+it to conclude that at most one operation's disjunct of the step predicate can
+hold, and that this operation is $\code[\pc_1]$.
+\begin{instruction}
+Teams whose architecture selects the operation differently (e.g.\ via selector
+columns) must ensure an equivalent guarantee: the constraint system must force
+the satisfied operation branch to be the one fetched at $\pc_1$.  Without it,
+the memory-reconstruction rule of
+Proposition~\ref{prop:memory-extractability} can diverge from the satisfied
+branch and the commitment invariant fails without any binding violation.
+\end{instruction}
+
+The conjunct $\mem_2=\mem_1$ in~\eqref{eq:phi-read-decomp} is kept explicit for
+the same reason as for the non-memory operations: a read must not be able to
+silently alter memory.  Without it $\varphi_{\rea}$ would leave $\mem_2$ completely
+unconstrained, and a trace satisfying $\varphi_{\step}$ at every step could
+still replace the whole memory at a read.  Note that $\varphi_{\writ}$ needs no
+such conjunct, as~\eqref{eq:phi-write-decomp} already determines $\mem_2$
+entirely.
+
+

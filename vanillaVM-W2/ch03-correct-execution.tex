@@ -1,0 +1,227 @@
+\section{Correct execution of a program}
+In this section, we define via predicates what it means that a program is correctly executed. We will use these predicates in Section~\ref{sec:proof-arch} to define the relations that the zkVM proves.
+
+\subsection{Predicates for individual operations}
+
+\begin{instruction}
+Teams should list all operations supported by their zkVM and define the corresponding predicates based on their architecture.
+\end{instruction}
+
+Each operation is treated as a black box with its
+own predicate $\varphi_{op}$ (cf. ~\eqref{eq:phiop}).
+Throughout this section, subscripts $1$ and $2$ denote states before and after an operation.
+We also denote $S_1:=(\pc_1,\regs_1,\mem_1)$ and
+$S_2:=(\pc_2,\regs_2,\mem_2)$ as the states
+before and after the operation.
+
+We group operations as follows:
+\begin{itemize}
+	\item \textbf{Memory operations.}
+	Read: $\pred{read}(S_1,S_2)$ --- does not modify memory.
+	Write: $\pred{write}(S_1,S_2)$ --- may modify memory.
+	\item \textbf{Precompiles.}
+	Keccak: $\pred{keccak}(S_1,S_2)$.
+	Poseidon: $\pred{poseidon}(S_1,S_2)$.
+	 \item \textbf{Arithmetic without range checks.} $\op_1,\ldots,\op_{10}$
+	 with predicates $
+   \pred{\op_i}(S_1,S_2)$.
+	 \item \textbf{Arithmetic with range checks.} $\op_{11},\ldots,\op_{20}$
+	 with predicates $\pred{\op_i}(S_1,S_2)$, each decomposable as
+	 $\pred{\op_i}'(S_1,S_2)\wedge \pred{range}(S_1)$
+	 where the constants defining the range check are always in the
+   last two registers.
+\end{itemize}
+All operations except $\rea$ and $\writ$ neither read nor write memory. For
+such an operation we take
+$\varphi_{op}(S_1,S_2) := \varphi'_{op}(\pc_1,\regs_1,\pc_2,\regs_2) \wedge \mem_2 = \mem_1$,
+where $\varphi'_{op}$ depends only on $\pc$ and $\regs$ and, as for every
+operation, includes the fetch conjunct $\code[\pc_1]=op$
+of~\eqref{eq:phiop}; the memory-equality
+conjunct $\mem_2 = \mem_1$ is kept explicit so that a non-memory step cannot
+silently alter memory. We write $\varphi'_{op}$ (and its committed version) for
+the pc-and-register part and keep the conjunct explicit throughout.
+\subsection{Correct execution of a single step}
+
+\begin{instruction}
+Teams should define the step predicate for their architecture, specifying how the correct operation is selected and verified at each step.
+\end{instruction}
+
+A single step executes the instruction at the current program counter.
+The step predicate selects the matching operation via a disjunction over all opcodes:
+\begin{equation*}\label{eq:step}
+\varphi_{step}(S_1,S_2):=
+\bigvee_{op\in \text{operations}} \varphi_{op}(S_1,S_2)
+\end{equation*}
+where $S_1:=(\pc_1,\regs_1,\mem_1)$ and $S_2:=(\pc_2,\regs_2,\mem_2)$ are the states before and after the step.
+Recall from~\eqref{eq:phiop} that each $\varphi_{op}$ includes the fetch conjunct
+$\code[\pc_1]=op$; hence $\varphi_{step}$ binds every step to the fixed program $\code$.
+
+\subsection{Delegating expensive operations using a Bus}
+
+\begin{instruction}
+Teams should describe how expensive operations (e.g., precompiles, range checks) are delegated to a bus or similar mechanism in their architecture.
+\end{instruction}
+
+Range checks and precompile calls are expensive to prove inline.
+Instead, we collect them in a shared \emph{bus} $\BBB$
+and verify separately, proving the consistency along the way.
+The \emph{bus} $\BBB$ is a collection of  all
+precompile calls and range checks within a segment. That is, it has the following structure:
+$$
+\BBB=\{(\underbrace{\op^{(i)}}_{\in\{\keccak,\poseidon\}},
+S_1^{(i)},S_2^{(i)})\}_{i=1}^{b}\;\cup\;
+\{(\range,S^{(j)} )\}_{j=1}^{r}
+$$
+where $b$ is the number of precompile calls and $r$ is the number of range checks.
+
+
+Now we define auxiliary predicates that filter the bus by operation type
+and assert correctness of each entry:
+$\pred{\keccak}(\BBB)$ checks all Keccak entries,
+$\pred{\poseidon}(\BBB)$ checks all Poseidon entries,
+and $\pred{\range}(\BBB)$ checks all range-check entries.
+Concretely:
+\begin{align*}
+\pred{\keccak}(\BBB)&:=
+\bigwedge_{( \keccak,S_1,S_2)\in\BBB}
+\pred{keccak}(S_1,S_2)\\
+\pred{\poseidon}(\BBB)&:=
+\bigwedge_{( \poseidon,S_1,S_2)\in\BBB}
+\pred{poseidon}(S_1,S_2)\\
+\pred{\range}(\BBB)&:=
+\bigwedge_{( \range,S)\in\BBB}
+\pred{\range}(S)
+\end{align*}
+
+We now rewrite the step predicate \eqref{eq:step} to separate
+inline verification from bus-deferred verification.
+The new form is equivalent\footnote{Formally the new predicate is even stronger
+as it also asserts the correctness of the operations in $\BBB$ not listed
+in the segment.
+ We omit checking for such operations for efficiency.}:
+\begin{equation}\label{eq:step-expanded}
+  \pred{step}(S_1,S_2,\BBB):=
+\pred{step,bus}(S_1,S_2,\BBB)
+\wedge \pred{\keccak}(\BBB)\wedge \pred{\poseidon}(\BBB) \wedge \pred{\range}(\BBB)
+\end{equation}
+where
+\begin{multline}
+	\pred{step,bus}(S_1,S_2,\BBB):=
+\bigvee_{op\in \{\rea,\writ,\op_1, \ldots,\op_{10}\}}
+\left(\pred{op}(S_1,S_2)
+\right)\\
+\bigvee_{op\in \{\op_{11}, \ldots,\op_{20}\}}
+ \left(\pred{op}'(S_1,S_2)
+\wedge (\range,S_1)\in\BBB \wedge \mem_2=\mem_1\right)\\
+\bigvee_{op\in \{\text{Keccak},\text{Poseidon}\}} \left((op,S_1,S_2)\in\BBB \wedge \mem_2=\mem_1\right)
+\end{multline}
+Recall that $S_1:=(\pc_1,\regs_1,\mem_1)$ and $S_2:=(\pc_2,\regs_2,\mem_2)$.
+The predicate $\pred{step,bus}$ separates operations into three categories:
+\begin{itemize}
+\item \textbf{Memory ops and arithmetic without range checks} ($\rea,\writ,\op_1,\ldots,\op_{10}$) are verified inline via their predicates.
+\item \textbf{Arithmetic with range checks} ($\op_{11},\ldots,\op_{20}$): the arithmetic logic $\pred{op}$ is verified inline, but the range check is deferred by recording $(\range,S_1)$ in~$\BBB$.
+\item \textbf{Precompiles} (Keccak, Poseidon) are fully deferred --- the step only checks that the call appears in~$\BBB$, while correctness will be verified by $\pred{\keccak}(\BBB)$, $\pred{\poseidon}(\BBB)$ in~\eqref{eq:step-expanded}.
+\end{itemize}
+
+
+\subsection{Committed memory}
+
+\begin{instruction}
+Teams should describe how memory is committed
+and how memory operations are verified in their architecture.
+\end{instruction}
+
+The full memory state is too large to pass around directly,
+so we replace it with the Merkle tree commitment $\Com$.
+Concretely, $\Com := (\mathsf{Commit}, \mathsf{Open}, \mathsf{Verify})$ is the Merkle tree
+vector commitment scheme: $\mathsf{Commit}(\mem)$ returns the Merkle root of the memory
+vector $\mem$; $\mathsf{Open}(\mem, i)$ returns the authentication path for position $i$;
+and $\mathsf{Verify}(C, i, v, \pi) = 1$ iff $\pi$ is a valid Merkle authentication path
+certifying that position $i$ of the committed vector holds value $v$ under root $C$.
+The commitment scheme is used for the following memory operations:
+$\rea$ (read), $\writ$ (write), and any other operation that reads
+or writes a memory cell.
+We define a \emph{state with committed memory} $\hat{S}:=(\pc,\regs,\hat{\mem})$, where $\hat{\mem}:=\mathsf{Commit}(\mem)$ is the memory commitment value,
+replacing the full memory in $S:=(\pc,\regs,\mem)$ with its commitment.
+
+The opening proofs $\pi$ (for reads) and $(\pi_{\writ},v_{\mathsf{old}})$ (for writes)
+are passed as explicit arguments to the predicates rather than existentially quantified.
+This is essential for the security proof: the binding properties of $\Com_{\mathsf{mem}}$
+apply only to proofs that are efficiently produced by a PPT algorithm, so the proofs must
+appear as concrete witness fields in $\relation_{0,\step}$ from which the extractor can
+retrieve them, rather than merely existing abstractly.
+
+The read operation predicate becomes
+\begin{equation}\label{eq:op-mem-comm-read}
+\begin{array}{r@{\;}l}
+  \widehat{\pred{}}_{\rea}(\hat{S}_1,\hat{S}_2,\pi) \;:= &
+    \varphi'_{\rea}(\hat{S}_1.\pc,\hat{S}_1.\regs,\hat{S}_2.\pc,\hat{S}_2.\regs)\\
+  & {}\wedge\; \hat{S}_1.\mem = \hat{S}_2.\mem\\
+  & {}\wedge\;
+    \mathsf{Verify}(\hat{S}_1.\mem,\;\hat{S}_1.\regs[0],\;\hat{S}_2.\regs[1],\;\pi)=1.
+\end{array}
+\end{equation}
+Here $\mathsf{Verify}$ is the Merkle opening-verification algorithm described above;
+the proof $\pi$ is supplied explicitly as a witness by the prover.
+The write operation predicate becomes
+\begin{equation}\label{eq:op-mem-comm-write}
+\begin{array}{r@{\;}l}
+  \widehat{\pred{}}_{\writ}(\hat{S}_1,\hat{S}_2,\pi^{\mathsf{mem}}) \;:= &
+    \varphi'_{\writ}(\hat{S}_1.\pc,\hat{S}_1.\regs,\hat{S}_2.\pc,\hat{S}_2.\regs)\\
+  & {}\wedge\; \mathsf{Verify}(\hat{S}_1.\mem,\;\hat{S}_1.\regs[0],\;\pi^{\mathsf{mem}}.v_{\mathsf{old}},\;\pi^{\mathsf{mem}}.\pi_{\writ})=1\\
+  & {}\wedge\; \mathsf{Verify}(\hat{S}_2.\mem,\;\hat{S}_1.\regs[0],\;\hat{S}_1.\regs[1],\;\pi^{\mathsf{mem}}.\pi_{\writ})=1.
+\end{array}
+\end{equation}
+Here, for a write step, $\pi^{\mathsf{mem}} = (\pi_{\writ}, v_{\mathsf{old}})$ bundles the
+Merkle authentication path $\pi_{\writ}$ together with the old value $v_{\mathsf{old}}$
+stored at the written address before the step.
+
+
+
+Replacing memory with commitments in \eqref{eq:step-expanded}
+ gives the step relation:
+\begin{equation}\label{eq:step-bus2}
+  \widehat{\pred{}}_{step}(\hat{S}_1,\hat{S}_2,\widehat{\BBB},\pi^{\mathsf{mem}})
+ :=\widehat{\pred{}}_{step,bus}(\hat{S}_1,\hat{S}_2,\widehat{\BBB},\pi^{\mathsf{mem}})
+\wedge  \widehat{\pred{}}_{\keccak}(\widehat{\BBB})\wedge \widehat{\pred{}}_{\poseidon}(\widehat{\BBB}) \wedge \widehat{\pred{}}_{\range}(\widehat{\BBB})
+\end{equation}
+where $\widehat{\BBB}$ replaces the memory entries with
+committed memory (which is practically invisible as
+the bus operations do not use memory); $\widehat{\pred{}}_{\keccak}$,
+$\widehat{\pred{}}_{\poseidon}$, $\widehat{\pred{}}_{\range}$ are obtained from
+$\pred{\keccak}$, $\pred{\poseidon}$, $\pred{\range}$ by the same substitution.
+Their pc-and-register parts $\pred{op}'$ are literally unchanged, since those
+parts do not reference memory; the only difference is that the conjunct
+$\mem_2=\mem_1$ carried by every non-memory operation predicate becomes the
+commitment equality $\hat{S}_1.\mem=\hat{S}_2.\mem$.  (The range-check predicate
+$\pred{range}(S_1)$ constrains registers only and has no memory conjunct at all,
+so it is unchanged outright.)  Finally, $\widehat{\pred{}}_{step,bus}$ is
+defined analogously to $\pred{step,bus}$
+but with all operation predicates replaced
+by their committed-memory versions:
+\begin{multline}
+	\widehat{\pred{}}_{step,bus}(\hat{S}_1,\hat{S}_2,\widehat{\BBB},\pi^{\mathsf{mem}}):=
+\widehat{\pred{}}_{\rea}(\hat{S}_1,\hat{S}_2,\pi^{\mathsf{mem}})
+\;\vee\; \widehat{\pred{}}_{\writ}(\hat{S}_1,\hat{S}_2,\pi^{\mathsf{mem}})\\
+\vee\bigvee_{op\in \{\op_1,\op_2,\ldots,\op_{10}\}}
+\left(\widehat{\pred{}}_{op}(\hat{S}_1,\hat{S}_2)
+\wedge \hat{S}_1.\mem=\hat{S}_2.\mem
+\right)\\
+\vee\bigvee_{op\in \{\op_{11},\op_{12},\ldots,\op_{20}\}}
+ \left(\widehat{\pred{}}_{op}'(\hat{S}_1,\hat{S}_2)
+\wedge (\range,\hat{S}_1)\in\widehat{\BBB}
+\wedge \hat{S}_1.\mem=\hat{S}_2.\mem\right)\\
+\vee\bigvee_{op\in \{\text{Keccak},\text{Poseidon}\}} \left((op,\hat{S}_1,\hat{S}_2)\in\widehat{\BBB}
+\wedge \hat{S}_1.\mem=\hat{S}_2.\mem\right)
+\end{multline}
+where, for a read step, $\pi^{\mathsf{mem}}$ is the Merkle authentication path $\pi$;
+for a write step, $\pi^{\mathsf{mem}} = (\pi_{\writ}, v_{\mathsf{old}})$ is the pair
+described above; for all other steps the memory-proof argument is unused.
+
+
+Note that \eqref{eq:step-expanded} and \eqref{eq:step-bus2} are not equivalent, and in fact are
+not even computationally equivalent: satisfying the committed-memory predicate does not imply
+satisfying the full-memory predicate even for computationally bounded provers, because opening
+a commitment to the full memory vector may be infeasible.
+Proposition~\ref{prop:memory-extractability} shows that the gap is bounded by the position-binding
+and update-binding advantages of the commitment scheme $\Com_{\mathsf{mem}}$.

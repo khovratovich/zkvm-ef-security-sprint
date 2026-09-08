@@ -1,0 +1,16 @@
+\section*{Overview}
+
+This document describes a sample \emph{vanilla zkVM} architecture designed according to the W1 deliverable of the EF zkVM whitepaper guidelines\footnote{\url{https://zkevm.ethereum.foundation/blog/cryptography-research-update}}.
+The architecture proves execution of a fixed RV+ (extended RISC-V) guest program using:
+
+\begin{itemize}
+\item Segmented execution traces
+\item Specialized constraint systems (``chips'')
+\item A system of interaction buses
+\item In-circuit bus-membership checks for bus consistency
+\item Abstract knowledge-sound SNARKs for all circuits
+\item Recursive aggregation of segment proofs
+\end{itemize}
+
+After execution, the trace is divided into segments. Each segment is proven by four inner circuits tied together by a shared bus, whose proofs are verified by a single segment circuit. Segment proofs are then recursively aggregated in a binary tree until a single proof attests to correctness of the entire program execution.
+
